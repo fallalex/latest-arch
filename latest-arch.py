@@ -14,12 +14,15 @@ from distutils import util
 import sys
 import hashlib
 
+class MissingField(Exception):
+    def __init__(self, expression):
+        self.expression = expression
+
 class latestArch:
     def __init__(self):
         self.arch_url = 'https://www.archlinux.org'
         self.releases_endpoint = '/releng/releases'
         self.releases_url = self.arch_url + self.releases_endpoint
-        self.torrent_url = self.releases_endpoint + '/torrent'
         self.cwd = pathlib.Path(os.getcwd())
         self.script_dir = pathlib.Path(os.path.realpath(__file__)).parent
         self.iso_info_path = self.cwd / '.arch-iso'
@@ -28,22 +31,32 @@ class latestArch:
 
         self.get_release_url()
         self.get_iso_info()
-        self.str_iso_info()
+        self.map_iso_links()
+        self.sanitize_iso_info()
+        print(tabulate(self.iso_info.items()))
         self.iso_path = self.cwd / self.iso_info['file_name']
+        self.get_torrent()
         print(self.file_hash())
 
     def get_release_url(self):
         r = requests.get(self.releases_url)
         page = html.fromstring(r.text)
-        self.latest_release_endpoint = page.xpath('//*[@id="release-table"]/tbody/tr[1]/td[3]/a/@href')[0]
-        self.latest_release_url = self.arch_url + self.latest_release_endpoint
+        latest_release_endpoint = page.xpath('//*[@id="release-table"]/tbody/tr[1]/td[3]/a/@href')[0]
+        self.latest_release_url = self.arch_url + latest_release_endpoint
+
+    def map_iso_links(self):
+        for link in self.iso_links:
+            if 'magnet' in link.lower():
+                self.iso_info['magnet_link'] = link
+            elif 'torrent' in link.lower():
+                self.iso_info['torrent_link'] = self.arch_url + link
 
     def get_iso_info(self):
         r = requests.get(self.latest_release_url)
         page = html.fromstring(r.text)
         ul = page.xpath('//*[@class="release box"]/ul/li')
         self.iso_links = []
-        iso_info = dict()
+        self.iso_info = dict()
         for li in ul:
             hrefs = li.xpath('./a/@href')
             if not hrefs:
@@ -51,36 +64,32 @@ class latestArch:
                 row = [i.strip() for i in row]
                 if len(row) == 2:
                     k, v = row
-                    iso_info[slugify(k, separator='_')] = v
+                    self.iso_info[slugify(k, separator='_')] = v
             self.iso_links.extend(hrefs)
 
-        # Ensure we have the expected fields
-        expected_keys = ('release_date', 'kernel_version', 'available', 'md5', 'sha1', 'file_name', 'info_hash')
+    def sanitize_iso_info(self):
+        expected_keys = ('release_date', 'kernel_version', 'available', 'md5',
+                         'sha1', 'file_name', 'info_hash', 'magnet_link', 'torrent_link')
         for k in expected_keys:
-            assert(k in iso_info)
-        self.iso_info = {k: v for k, v in iso_info.items() if k in expected_keys}
+            if not k in self.iso_info:
+                raise MissingField(k)
+        self.iso_info = {k: v for k, v in self.iso_info.items() if k in expected_keys}
 
         # Convert values
-        self.iso_info['release_date'] = datetime.strptime(iso_info['release_date'], '%Y-%m-%d')
-        self.iso_info['available'] = bool(util.strtobool(iso_info['available']))
-
-    def str_iso_info(self):
-        print(tabulate(self.iso_info.items()))
-        for link in self.iso_links:
-            print(link)
-        print()
+        self.iso_info['release_date'] = datetime.strptime(self.iso_info['release_date'], '%Y-%m-%d')
+        self.iso_info['available'] = bool(util.strtobool(self.iso_info['available']))
 
     def get_torrent(self):
-        if torrent_status(iso_info['info_hash']) == 2:
-            with requests.get(self.torrent_url) as r:
+        if self.torrent_status() == 2:
+            with requests.get(self.iso_info['torrent_link']) as r:
                 with open(self.torrent_path, 'wb') as f:
-                    write(r.content)
+                    f.write(r.content)
             with open(self.torrent_path, 'rb') as f:
-                qbreturn = self.bitclient.download_from_file(f)
+                self.bitclient.download_from_file(f)
         else:
             print("Not downloading")
 
-        iso_path = pathlib.Path(qb.get_default_save_path()) / iso_info['file_name']
+        self.iso_path = pathlib.Path(self.bitclient.get_default_save_path()) / self.iso_info['file_name']
 
 
     def torrent_status(self):
@@ -94,11 +103,10 @@ class latestArch:
         self.bitclient.api_version
         self.bitclient.qbittorrent_version
         try:
-            torrent_info = self.bitclient.get_torrent(self.iso_info['hash'])
+            torrent_info = self.bitclient.get_torrent(self.iso_info['info_hash'])
         except Exception as e:
             # likely the torrent is not loaded
             # could also be no connection
-            print(e)
             return 2
         # '-1' if not complete, otherwise epoch time
         if int(torrent_info['completion_date']) >= 0:
@@ -125,3 +133,4 @@ latestArch()
 # json for ".arch-iso"
 # CWD paths for downloads rather than script file dir
 # remove old torrent
+# requests checks
