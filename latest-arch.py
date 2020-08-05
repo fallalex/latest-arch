@@ -24,30 +24,46 @@ class latestArch:
         # TODO - load from configuration or commandline
         self.cwd = pathlib.Path(os.getcwd())
         self.script_dir = pathlib.Path(os.path.realpath(__file__)).parent
+
         self.arch_url = 'https://www.archlinux.org'
         self.releases_endpoint = '/releng/releases'
         self.releases_url = self.arch_url + self.releases_endpoint
         self.iso_info_path = self.cwd / '.arch-iso'
+        self.hash = 'sha1'
         self.torrent_path = self.cwd / 'arch.torrent'
         self.bitclient = Client('http://127.0.0.1:8080/')
+        self.expected_torrent_fields = ('completion_date', 'eta', 'pieces_have', 'pieces_num')
+        self.expected_iso_fields = ('release_date', 'kernel_version', self.hash,
+                                    'file_name', 'info_hash', 'torrent_link')
 
+        if not self.bitclient_status():
+            print('Bittorrent client not reachable.')
+            sys.exit()
+        self.load_last_iso_info()
         self.get_release_url()
         self.get_iso_info()
         self.map_iso_links()
         self.sanitize_iso_info()
-        print(tabulate(self.iso_info.items()))
         self.iso_path = self.cwd / self.iso_info['file_name']
+        print(tabulate(self.iso_info.items()))
+        if not self.is_new_release():
+            print("Current is latest, no action needed.")
+            sys.exit()
         self.get_torrent()
         self.poll_download()
-        print(self.file_hash())
+        if not self.good_file_hash():
+            print("Does not match checksum, download corupt.")
+        self.save_iso_info()
 
     def get_release_url(self):
+        print('find page for latest release')
         r = requests.get(self.releases_url)
         page = html.fromstring(r.text)
         latest_release_endpoint = page.xpath('//*[@id="release-table"]/tbody/tr[1]/td[3]/a/@href')[0]
         self.latest_release_url = self.arch_url + latest_release_endpoint
 
     def map_iso_links(self):
+        print('translate links to keyed values')
         for link in self.iso_links:
             if 'magnet' in link.lower():
                 self.iso_info['magnet_link'] = link
@@ -55,6 +71,7 @@ class latestArch:
                 self.iso_info['torrent_link'] = self.arch_url + link
 
     def get_iso_info(self):
+        print('scraping iso info')
         r = requests.get(self.latest_release_url)
         page = html.fromstring(r.text)
         ul = page.xpath('//*[@class="release box"]/ul/li')
@@ -71,28 +88,38 @@ class latestArch:
             self.iso_links.extend(hrefs)
 
     def sanitize_iso_info(self):
-        expected_keys = ('release_date', 'kernel_version', 'available', 'md5',
-                         'sha1', 'file_name', 'info_hash', 'magnet_link', 'torrent_link')
-        for k in expected_keys:
+        print('sanitize iso info')
+        for k in self.expected_iso_fields:
             if not k in self.iso_info:
                 raise MissingField(k)
-        self.iso_info = {k: v for k, v in self.iso_info.items() if k in expected_keys}
+        self.iso_info = {k: v for k, v in self.iso_info.items() if k in self.expected_iso_fields}
 
-        # Convert values
+        # Convert value
         self.iso_info['release_date'] = datetime.strptime(self.iso_info['release_date'], '%Y-%m-%d')
-        self.iso_info['available'] = bool(util.strtobool(self.iso_info['available']))
+        # self.iso_info['available'] = bool(util.strtobool(self.iso_info['available']))
+
+    def is_new_release(self):
+        print('check for new release')
+        assert(set(self.iso_info.keys()) == set(self.last_iso_info.keys()))
+        if self.iso_info[self.hash] != self.last_iso_info[self.hash]:
+            return True
+        if not self.good_file_hash():
+            print('Cache claims latest, checksums dont match')
+            return True
+        return False
 
     def get_torrent(self):
+        print('download and start torrent')
+        #TODO check path
         if self.torrent_status() == 2:
             with requests.get(self.iso_info['torrent_link']) as r:
                 with open(self.torrent_path, 'wb') as f:
                     f.write(r.content)
             with open(self.torrent_path, 'rb') as f:
-                self.bitclient.download_from_file(f)
+                self.bitclient.download_from_file(f, savepath=self.iso_path)
         else:
             print("Not downloading")
 
-        self.iso_path = pathlib.Path(self.bitclient.get_default_save_path()) / self.iso_info['file_name']
         assert(self.torrent_status() in (0,1))
 
 
@@ -118,8 +145,7 @@ class latestArch:
         # '-1' if not complete, otherwise epoch time
         if int(self.torrent_info['completion_date']) >= 0:
             return 0
-        # expected fields exist
-        for k in ('completion_date', 'dl_speed', 'eta', 'pieces_have', 'pieces_num', 'time_elapsed'):
+        for k in self.expected_torrent_fields:
             if not k in self.torrent_info:
                 raise MissingField(k)
         return 1
@@ -152,7 +178,8 @@ class latestArch:
                     # print('no client')
                 sleep(3)
 
-    def file_hash(self):
+    def good_file_hash(self):
+        print('Checking hash')
         chunk = 65536  # 64kB
         md5 = hashlib.md5()
         sha1 = hashlib.sha1()
@@ -160,16 +187,36 @@ class latestArch:
             while True:
                 data = f.read(chunk)
                 if not data: break
-                md5.update(data)
-                sha1.update(data)
-        return {'md5': md5.hexdigest(), 'sha1': sha1.hexdigest()}
+                if self.hash == 'md5': md5.update(data)
+                elif self.hash == 'sha1': sha1.update(data)
+                else: raise Exception
+        if self.hash == 'md5':
+            return md5.hexdigest() == self.iso_info['md5']
+        return sha1.hexdigest() == self.iso_info['sha1']
+
+    def save_iso_info(self):
+        print('save iso info')
+        #TODO check path
+        with open(self.iso_info_path, 'w') as f:
+            # datetime object will default to string
+            f.write(json.dumps(self.iso_info, default=str))
+            print(self.iso_info['release_date'])
+
+
+    def load_last_iso_info(self):
+        print('load iso info')
+        #TODO check path
+        self.last_iso_info = dict()
+        if self.iso_info_path.exists():
+            with open(self.iso_info_path, 'r') as f:
+                self.last_iso_info = json.loads(f.read())
+                self.last_iso_info['release_date'] = datetime.strptime(self.last_iso_info['release_date'], '%Y-%m-%d %H:%M:%S')
 
 latestArch()
 
 
 # TODO:
-# check last version
-# json for ".arch-iso"
-# CWD paths for downloads rather than script file dir
 # remove old torrent
 # requests checks
+# cli
+# print to logging
