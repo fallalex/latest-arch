@@ -183,18 +183,15 @@ class latestArch:
     def good_file_hash(self):
         print('Checking hash')
         chunk = 65536  # 64kB
-        md5 = hashlib.md5()
-        sha1 = hashlib.sha1()
+        if self.hash == 'md5': hash_method = hashlib.md5()
+        elif self.hash == 'sha1': hash_method = hashlib.sha1()
+        else: raise Exception
         with open(self.iso_path, 'rb') as f:
             while True:
                 data = f.read(chunk)
                 if not data: break
-                if self.hash == 'md5': md5.update(data)
-                elif self.hash == 'sha1': sha1.update(data)
-                else: raise Exception
-        if self.hash == 'md5':
-            return md5.hexdigest() == self.iso_info['md5']
-        return sha1.hexdigest() == self.iso_info['sha1']
+                hash_method.update(data)
+        return hash_method.hexdigest() == self.iso_info['sha1']
 
     def save_iso_info(self):
         print('save iso info')
