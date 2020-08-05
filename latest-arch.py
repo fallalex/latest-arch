@@ -103,6 +103,8 @@ class latestArch:
         assert(set(self.iso_info.keys()) == set(self.last_iso_info.keys()))
         if self.iso_info[self.hash] != self.last_iso_info[self.hash]:
             return True
+        if not self.iso_path.exists():
+            return True
         if not self.good_file_hash():
             print('Cache claims latest, checksums dont match')
             return True
@@ -116,7 +118,7 @@ class latestArch:
                 with open(self.torrent_path, 'wb') as f:
                     f.write(r.content)
             with open(self.torrent_path, 'rb') as f:
-                self.bitclient.download_from_file(f, savepath=self.iso_path)
+                self.bitclient.download_from_file(f, savepath=self.cwd)
         else:
             print("Not downloading")
 
@@ -200,8 +202,6 @@ class latestArch:
         with open(self.iso_info_path, 'w') as f:
             # datetime object will default to string
             f.write(json.dumps(self.iso_info, default=str))
-            print(self.iso_info['release_date'])
-
 
     def load_last_iso_info(self):
         print('load iso info')
