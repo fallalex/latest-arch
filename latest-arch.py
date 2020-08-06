@@ -14,6 +14,7 @@ from distutils import util
 import sys
 import hashlib
 from time import sleep
+from loguru import logger
 
 class MissingField(Exception):
     def __init__(self, expression):
@@ -21,9 +22,15 @@ class MissingField(Exception):
 
 class latestArch:
     def __init__(self):
+        self.log_level = 'DEBUG'
+        logger.remove()
+        self.log_handler = logger.add(sys.stderr, level=self.log_level)
+
         # TODO - load from configuration or commandline
         self.cwd = pathlib.Path(os.getcwd())
         self.script_dir = pathlib.Path(os.path.realpath(__file__)).parent
+        logger.debug("CWD = '{}'".format(self.cwd))
+        logger.debug("Script DIR = '{}'".format(self.script_dir))
 
         self.arch_url = 'https://www.archlinux.org'
         self.releases_endpoint = '/releng/releases'
@@ -37,7 +44,7 @@ class latestArch:
                                     'file_name', 'info_hash', 'torrent_link')
 
         if not self.bitclient_status():
-            print('Bittorrent client not reachable.')
+            logger.debug('Bittorrent client not reachable.')
             sys.exit()
         self.load_last_iso_info()
         self.get_release_url()
@@ -45,25 +52,26 @@ class latestArch:
         self.map_iso_links()
         self.sanitize_iso_info()
         self.iso_path = self.cwd / self.iso_info['file_name']
-        print(tabulate(self.iso_info.items()))
+        logger.info('\n' + tabulate(self.iso_info.items()))
         if not self.is_new_release():
-            print("Current is latest, no action needed.")
+            logger.debug("Current is latest, no action needed.")
             sys.exit()
         self.get_torrent()
         self.poll_download()
         if not self.good_file_hash():
-            print("Does not match checksum, download corupt.")
+            logger.debug("Does not match checksum, download corupt.")
+            sys.exit()
         self.save_iso_info()
 
     def get_release_url(self):
-        print('find page for latest release')
+        logger.debug('find page for latest release')
         r = requests.get(self.releases_url)
         page = html.fromstring(r.text)
         latest_release_endpoint = page.xpath('//*[@id="release-table"]/tbody/tr[1]/td[3]/a/@href')[0]
         self.latest_release_url = self.arch_url + latest_release_endpoint
 
     def map_iso_links(self):
-        print('translate links to keyed values')
+        logger.debug('translate links to keyed values')
         for link in self.iso_links:
             if 'magnet' in link.lower():
                 self.iso_info['magnet_link'] = link
@@ -71,7 +79,7 @@ class latestArch:
                 self.iso_info['torrent_link'] = self.arch_url + link
 
     def get_iso_info(self):
-        print('scraping iso info')
+        logger.debug('scraping iso info')
         r = requests.get(self.latest_release_url)
         page = html.fromstring(r.text)
         ul = page.xpath('//*[@class="release box"]/ul/li')
@@ -88,7 +96,7 @@ class latestArch:
             self.iso_links.extend(hrefs)
 
     def sanitize_iso_info(self):
-        print('sanitize iso info')
+        logger.debug('sanitize iso info')
         for k in self.expected_iso_fields:
             if not k in self.iso_info:
                 raise MissingField(k)
@@ -99,19 +107,21 @@ class latestArch:
         # self.iso_info['available'] = bool(util.strtobool(self.iso_info['available']))
 
     def is_new_release(self):
-        print('check for new release')
+        logger.debug('check for new release')
+        if not self.last_iso_info:
+            return True
         assert(set(self.iso_info.keys()) == set(self.last_iso_info.keys()))
         if self.iso_info[self.hash] != self.last_iso_info[self.hash]:
             return True
         if not self.iso_path.exists():
             return True
         if not self.good_file_hash():
-            print('Cache claims latest, checksums dont match')
+            logger.debug('Cache claims latest, checksums dont match')
             return True
         return False
 
     def get_torrent(self):
-        print('download and start torrent')
+        logger.debug('download and start torrent')
         #TODO check path
         if self.torrent_status() == 2:
             with requests.get(self.iso_info['torrent_link']) as r:
@@ -120,7 +130,8 @@ class latestArch:
             with open(self.torrent_path, 'rb') as f:
                 self.bitclient.download_from_file(f, savepath=self.cwd)
         else:
-            print("Not downloading")
+            logger.debug("Not downloading")
+            #TODO if new directory but iso is latest make symlink
 
         assert(self.torrent_status() in (0,1))
 
@@ -153,35 +164,34 @@ class latestArch:
         return 1
 
     def poll_download(self):
-        # check that downloaded is increasing between polls
-        # set retry limits for client and torrent
-        # set polling rate
-        # attempt to reload torrent if in bad state
-        #  - if not found and client up re-add
-        #  - if not downloading force start
-        #  - try bumping priority up
-        #  - delete and re-add
         with tqdm(total=self.torrent_info['pieces_num']) as pbar:
-            pbar.n = self.torrent_info['pieces_have']
-            pbar.refresh()
             while True:
                 status = self.torrent_status()
                 if not status:
+                    pbar.n = self.torrent_info['pieces_have']
+                    pbar.refresh()
                     pbar.close()
                     return
                 elif status == 1:
+                    # 8640000 == infinite eta
+                    if self.torrent_info['eta'] == 8640000:
+                        pbar.close()
+                        logger.debug('download stalled')
+                        sys.exit()
                     pbar.n = self.torrent_info['pieces_have']
                     pbar.refresh()
                 elif status == 2:
-                    pass
-                    # print('no hash')
+                    pbar.close()
+                    logger.debug('no hash')
+                    sys.exit()
                 elif status == 3:
-                    pass
-                    # print('no client')
-                sleep(3)
+                    pbar.close()
+                    logger.debug('no client')
+                    sys.exit()
+                sleep(2)
 
     def good_file_hash(self):
-        print('Checking hash')
+        logger.debug('Checking hash')
         chunk = 65536  # 64kB
         if self.hash == 'md5': hash_method = hashlib.md5()
         elif self.hash == 'sha1': hash_method = hashlib.sha1()
@@ -191,18 +201,16 @@ class latestArch:
                 data = f.read(chunk)
                 if not data: break
                 hash_method.update(data)
-        return hash_method.hexdigest() == self.iso_info['sha1']
+        return hash_method.hexdigest() == self.iso_info[self.hash]
 
     def save_iso_info(self):
-        print('save iso info')
-        #TODO check path
+        logger.debug('save iso info')
         with open(self.iso_info_path, 'w') as f:
             # datetime object will default to string
             f.write(json.dumps(self.iso_info, default=str))
 
     def load_last_iso_info(self):
-        print('load iso info')
-        #TODO check path
+        logger.debug('load iso info')
         self.last_iso_info = dict()
         if self.iso_info_path.exists():
             with open(self.iso_info_path, 'r') as f:
@@ -213,7 +221,9 @@ latestArch()
 
 
 # TODO:
-# remove old torrent
+# daemonize output
 # requests checks
 # cli
-# print to logging
+# set polling rate
+# log to file or stdout/stderr
+# log rotation
