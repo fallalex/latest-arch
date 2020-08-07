@@ -20,6 +20,26 @@ class MissingField(Exception):
     def __init__(self, expression):
         self.expression = expression
 
+class BittorrentUnreachable(Exception):
+    def __init__(self, expression):
+        self.expression = expression
+
+class DownloadStalled(Exception):
+    def __init__(self):
+        pass
+
+class NoTorrentHash(Exception):
+    def __init__(self, expression):
+        self.expression = expression
+
+class ISOFailedHash(Exception):
+    def __init__(self):
+        pass
+
+class ISONotFound(Exception):
+    def __init__(self):
+        pass
+
 class latestArch:
     def __init__(self):
         self.log_level = 'DEBUG'
@@ -43,9 +63,7 @@ class latestArch:
         self.expected_iso_fields = ('release_date', 'kernel_version', self.hash,
                                     'file_name', 'info_hash', 'torrent_link')
 
-        if not self.bitclient_status():
-            logger.debug('Bittorrent client not reachable.')
-            sys.exit()
+        self.bitclient_status()
         self.load_last_iso_info()
         self.get_release_url()
         self.get_iso_info()
@@ -58,14 +76,18 @@ class latestArch:
             sys.exit()
         self.get_torrent()
         self.poll_download()
-        if not self.good_file_hash():
-            logger.debug("Does not match checksum, download corupt.")
-            sys.exit()
+        self.verify_file_hash()
         self.save_iso_info()
+
+    def get(self, url):
+        try:
+            return requests.get(url)
+        except requests.exceptions.HTTPError as e:
+            raise SystemExit(e)
 
     def get_release_url(self):
         logger.debug('find page for latest release')
-        r = requests.get(self.releases_url)
+        r = self.get(self.releases_url)
         page = html.fromstring(r.text)
         latest_release_endpoint = page.xpath('//*[@id="release-table"]/tbody/tr[1]/td[3]/a/@href')[0]
         self.latest_release_url = self.arch_url + latest_release_endpoint
@@ -80,7 +102,7 @@ class latestArch:
 
     def get_iso_info(self):
         logger.debug('scraping iso info')
-        r = requests.get(self.latest_release_url)
+        r = self.get(self.latest_release_url)
         page = html.fromstring(r.text)
         ul = page.xpath('//*[@class="release box"]/ul/li')
         self.iso_links = []
@@ -115,93 +137,82 @@ class latestArch:
             return True
         if not self.iso_path.exists():
             return True
-        if not self.good_file_hash():
-            logger.debug('Cache claims latest, checksums dont match')
+        if self.torrent_done():
+            self.verify_file_hash()
+        else:
             return True
         return False
 
     def get_torrent(self):
         logger.debug('download and start torrent')
-        #TODO check path
-        if self.torrent_status() == 2:
-            with requests.get(self.iso_info['torrent_link']) as r:
+        if self.torrent_present() == False:
+            with self.get(self.iso_info['torrent_link']) as r:
                 with open(self.torrent_path, 'wb') as f:
                     f.write(r.content)
             with open(self.torrent_path, 'rb') as f:
                 self.bitclient.download_from_file(f, savepath=self.cwd)
         else:
-            logger.debug("Not downloading")
-            #TODO if new directory but iso is latest make symlink
-
-        assert(self.torrent_status() in (0,1))
-
+            if self.torrent_done():
+                self.verify_file_hash()
 
     def bitclient_status(self):
         try:
             return (self.bitclient.qbittorrent_version, self.bitclient.api_version)
         except:
-            return None
+            raise BittclientUnreachable
 
-    def torrent_status(self):
-        """
-        0 = complete
-        1 = not complete
-        2 = no hash
-        3 = client not responding
-        """
-        try:
-            self.torrent_info = self.bitclient.get_torrent(self.iso_info['info_hash'])
-        except Exception as e:
-            if not self.bitclient_status():
-                return 3
-            return 2
+    def torrent_present(self):
+        try: return self.bitclient.get_torrent(self.iso_info['info_hash'])
+        except: self.bitclient_status()
+        return False
+
+    def torrent_done(self):
+        self.torrent_info = self.torrent_present()
+        if self.torrent_info == False:
+            raise NoTorrentHash
         # '-1' if not complete, otherwise epoch time
         if int(self.torrent_info['completion_date']) >= 0:
-            return 0
+            return True
         for k in self.expected_torrent_fields:
             if not k in self.torrent_info:
                 raise MissingField(k)
-        return 1
+        return False
 
     def poll_download(self):
         with tqdm(total=self.torrent_info['pieces_num']) as pbar:
             while True:
-                status = self.torrent_status()
-                if not status:
-                    pbar.n = self.torrent_info['pieces_have']
-                    pbar.refresh()
-                    pbar.close()
-                    return
-                elif status == 1:
+                try:
+                    if self.torrent_done():
+                        pbar.n = self.torrent_info['pieces_have']
+                        pbar.refresh()
+                        pbar.close()
+                        return
                     # 8640000 == infinite eta
                     if self.torrent_info['eta'] == 8640000:
                         pbar.close()
-                        logger.debug('download stalled')
-                        sys.exit()
+                        raise DownloadStalled
                     pbar.n = self.torrent_info['pieces_have']
                     pbar.refresh()
-                elif status == 2:
-                    pbar.close()
-                    logger.debug('no hash')
+                    sleep(2)
+                except Exception as e:
+                    logger.exception(e)
                     sys.exit()
-                elif status == 3:
-                    pbar.close()
-                    logger.debug('no client')
-                    sys.exit()
-                sleep(2)
 
-    def good_file_hash(self):
+    def verify_file_hash(self):
+        if not self.iso_path.exists():
+            raise ISONotFound
         logger.debug('Checking hash')
         chunk = 65536  # 64kB
         if self.hash == 'md5': hash_method = hashlib.md5()
         elif self.hash == 'sha1': hash_method = hashlib.sha1()
-        else: raise Exception
+        else: raise Exception # not an expected hash type
         with open(self.iso_path, 'rb') as f:
             while True:
                 data = f.read(chunk)
                 if not data: break
                 hash_method.update(data)
-        return hash_method.hexdigest() == self.iso_info[self.hash]
+        if not hash_method.hexdigest() == self.iso_info[self.hash]:
+            raise ISOFailedHash
 
     def save_iso_info(self):
         logger.debug('save iso info')
@@ -221,9 +232,5 @@ latestArch()
 
 
 # TODO:
-# daemonize output
-# requests checks
-# cli
-# set polling rate
 # log to file or stdout/stderr
-# log rotation
+# log errors
