@@ -76,7 +76,7 @@ class latestArch:
             logger.debug("Current is latest, no action needed.")
             sys.exit()
         self.get_torrent()
-        sleep(self.poll_interval) # give time for trackers and peers to establish
+        sleep(self.poll_interval * 2) # give time for trackers and peers to establish
         self.torrent_present()
         self.poll_download()
         self.verify_file_hash()
@@ -140,7 +140,7 @@ class latestArch:
             return True
         if not self.iso_path.exists():
             return True
-        if self.torrent_done():
+        if self.torrent_present() and self.torrent_done():
             self.verify_file_hash()
         else:
             return True
@@ -148,7 +148,7 @@ class latestArch:
 
     def get_torrent(self):
         logger.debug('download and start torrent')
-        if self.torrent_present() == False:
+        if not self.torrent_present():
             with self.get(self.iso_info['torrent_link']) as r:
                 with open(self.torrent_path, 'wb') as f:
                     f.write(r.content)
@@ -160,20 +160,22 @@ class latestArch:
 
     def bitclient_status(self):
         try:
-            return (self.bitclient.qbittorrent_version, self.bitclient.api_version)
+            assert(self.bitclient.qbittorrent_version)
+            assert(self.bitclient.api_version)
         except:
             raise BittclientUnreachable
 
     def torrent_present(self):
+        self.bitclient_status()
         try:
             self.torrent_info = self.bitclient.get_torrent(self.iso_info['info_hash'])
-            for k in self.expected_torrent_fields:
-                if not k in self.torrent_info:
-                    raise MissingField(k)
-            return True
         except:
-            self.bitclient_status()
-        return False
+            # assume 404 error
+            return False
+        for k in self.expected_torrent_fields:
+            if not k in self.torrent_info:
+                raise MissingField(k)
+        return True
 
     def torrent_done(self):
         if not self.torrent_present():
@@ -239,3 +241,4 @@ latestArch()
 # TODO:
 # log to file or stdout/stderr
 # log errors
+# account for checking/init time at start beyond sleep
