@@ -53,20 +53,13 @@ class latestISO:
         logger.debug("Script DIR = '{}'".format(self.script_dir))
 
         self.poll_interval = 2 # seconds
-        self.releases_url = self.arch_url + self.releases_endpoint
-        self.iso_info_path = self.cwd / '.arch-iso'
-        self.hash = 'sha1'
-        self.torrent_path = self.cwd / 'arch.torrent'
         self.bitclient = Client('http://127.0.0.1:8080/')
         self.expected_torrent_fields = ('completion_date', 'eta', 'pieces_have', 'pieces_num')
-        self.expected_iso_fields = ('release_date', 'kernel_version', self.hash,
-                                    'file_name', 'info_hash', 'torrent_link')
         self.hashes = {'md5': hashlib.md5(), 'sha1': hashlib.sha1()}
 
     def get_latest(self):
             self.bitclient_status()
             self.load_last_iso_info()
-            self.get_release_url()
             self.get_iso_info()
             self.iso_path = self.cwd / self.iso_info['file_name']
             logger.info('\n' + tabulate(self.iso_info.items()))
@@ -191,9 +184,15 @@ class latestISO:
 
 class latestArch(latestISO):
     def __init__(self):
+        super().__init__()
         self.arch_url = 'https://www.archlinux.org'
         self.releases_endpoint = '/releng/releases'
-        super().__init__()
+        self.releases_url = self.arch_url + self.releases_endpoint
+        self.iso_info_path = self.cwd / '.arch-iso'
+        self.torrent_path = self.cwd / 'arch.torrent'
+        self.hash = 'sha1'
+        self.expected_iso_fields = ('release_date', 'kernel_version', self.hash,
+                                    'file_name', 'info_hash', 'torrent_link')
 
     def get_release_url(self):
         logger.debug('find page for latest release')
@@ -203,6 +202,7 @@ class latestArch(latestISO):
         self.latest_release_url = self.arch_url + latest_release_endpoint
 
     def get_iso_info(self):
+        self.get_release_url()
         logger.debug('scraping iso info')
         r = self.get(self.latest_release_url)
         page = html.fromstring(r.text)
@@ -248,15 +248,17 @@ latestArch().get_latest()
 # redo debug out
 # redo info out
 # redo/add warn out?
-# account for checking/init time at start beyond sleep
+# account for checking/init time at start beyond sleep, use bitclient
 # check exit codes
+# document methods
 # unit tests
 # load from config
 # cli
 # see if there is a better way to do exceptions
-# get_torrent also trys to force start torrent
-# only print progress bar of stdout / add progress flag
-# parse torrent file
+# get_torrent should also try to force start
+# only print progress bar if using stdout to ttyl / add progress flag
+# parse torrent files for as much info as possible
 # expand for Fedora ISO
 # expand for Alpine ISO
+# break into files
 
