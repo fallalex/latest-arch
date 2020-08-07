@@ -29,8 +29,8 @@ class DownloadStalled(Exception):
         pass
 
 class NoTorrentHash(Exception):
-    def __init__(self, expression):
-        self.expression = expression
+    def __init__(self):
+        pass
 
 class ISOFailedHash(Exception):
     def __init__(self):
@@ -54,6 +54,7 @@ class latestArch:
 
         self.arch_url = 'https://www.archlinux.org'
         self.releases_endpoint = '/releng/releases'
+        self.poll_interval = 2 # seconds
         self.releases_url = self.arch_url + self.releases_endpoint
         self.iso_info_path = self.cwd / '.arch-iso'
         self.hash = 'sha1'
@@ -75,6 +76,8 @@ class latestArch:
             logger.debug("Current is latest, no action needed.")
             sys.exit()
         self.get_torrent()
+        sleep(self.poll_interval) # give time for trackers and peers to establish
+        self.torrent_present()
         self.poll_download()
         self.verify_file_hash()
         self.save_iso_info()
@@ -162,20 +165,22 @@ class latestArch:
             raise BittclientUnreachable
 
     def torrent_present(self):
-        try: return self.bitclient.get_torrent(self.iso_info['info_hash'])
-        except: self.bitclient_status()
+        try:
+            self.torrent_info = self.bitclient.get_torrent(self.iso_info['info_hash'])
+            for k in self.expected_torrent_fields:
+                if not k in self.torrent_info:
+                    raise MissingField(k)
+            return True
+        except:
+            self.bitclient_status()
         return False
 
     def torrent_done(self):
-        self.torrent_info = self.torrent_present()
-        if self.torrent_info == False:
+        if not self.torrent_present():
             raise NoTorrentHash
         # '-1' if not complete, otherwise epoch time
         if int(self.torrent_info['completion_date']) >= 0:
             return True
-        for k in self.expected_torrent_fields:
-            if not k in self.torrent_info:
-                raise MissingField(k)
         return False
 
     def poll_download(self):
@@ -193,10 +198,10 @@ class latestArch:
                         raise DownloadStalled
                     pbar.n = self.torrent_info['pieces_have']
                     pbar.refresh()
-                    sleep(2)
                 except Exception as e:
                     logger.exception(e)
                     sys.exit()
+                sleep(self.poll_interval)
 
     def verify_file_hash(self):
         if not self.iso_path.exists():
