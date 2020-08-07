@@ -40,7 +40,7 @@ class ISONotFound(Exception):
     def __init__(self):
         pass
 
-class latestArch:
+class latestISO:
     def __init__(self):
         self.log_level = 'DEBUG'
         logger.remove()
@@ -52,8 +52,6 @@ class latestArch:
         logger.debug("CWD = '{}'".format(self.cwd))
         logger.debug("Script DIR = '{}'".format(self.script_dir))
 
-        self.arch_url = 'https://www.archlinux.org'
-        self.releases_endpoint = '/releng/releases'
         self.poll_interval = 2 # seconds
         self.releases_url = self.arch_url + self.releases_endpoint
         self.iso_info_path = self.cwd / '.arch-iso'
@@ -63,73 +61,30 @@ class latestArch:
         self.expected_torrent_fields = ('completion_date', 'eta', 'pieces_have', 'pieces_num')
         self.expected_iso_fields = ('release_date', 'kernel_version', self.hash,
                                     'file_name', 'info_hash', 'torrent_link')
+        self.hashes = {'md5': hashlib.md5(), 'sha1': hashlib.sha1()}
 
-        self.bitclient_status()
-        self.load_last_iso_info()
-        self.get_release_url()
-        self.get_iso_info()
-        self.map_iso_links()
-        self.sanitize_iso_info()
-        self.iso_path = self.cwd / self.iso_info['file_name']
-        logger.info('\n' + tabulate(self.iso_info.items()))
-        if not self.is_new_release():
-            logger.debug("Current is latest, no action needed.")
-            sys.exit()
-        self.get_torrent()
-        sleep(self.poll_interval * 2) # give time for trackers and peers to establish
-        self.torrent_present()
-        self.poll_download()
-        self.verify_file_hash()
-        self.save_iso_info()
+    def get_latest(self):
+            self.bitclient_status()
+            self.load_last_iso_info()
+            self.get_release_url()
+            self.get_iso_info()
+            self.iso_path = self.cwd / self.iso_info['file_name']
+            logger.info('\n' + tabulate(self.iso_info.items()))
+            if not self.is_new_release():
+                logger.debug("Current is latest, no action needed.")
+                sys.exit()
+            self.get_torrent()
+            sleep(self.poll_interval * 2) # give time for trackers and peers to establish
+            self.torrent_present()
+            self.poll_download()
+            self.verify_file_hash()
+            self.save_iso_info()
 
     def get(self, url):
         try:
             return requests.get(url)
         except requests.exceptions.HTTPError as e:
             raise SystemExit(e)
-
-    def get_release_url(self):
-        logger.debug('find page for latest release')
-        r = self.get(self.releases_url)
-        page = html.fromstring(r.text)
-        latest_release_endpoint = page.xpath('//*[@id="release-table"]/tbody/tr[1]/td[3]/a/@href')[0]
-        self.latest_release_url = self.arch_url + latest_release_endpoint
-
-    def map_iso_links(self):
-        logger.debug('translate links to keyed values')
-        for link in self.iso_links:
-            if 'magnet' in link.lower():
-                self.iso_info['magnet_link'] = link
-            elif 'torrent' in link.lower():
-                self.iso_info['torrent_link'] = self.arch_url + link
-
-    def get_iso_info(self):
-        logger.debug('scraping iso info')
-        r = self.get(self.latest_release_url)
-        page = html.fromstring(r.text)
-        ul = page.xpath('//*[@class="release box"]/ul/li')
-        self.iso_links = []
-        self.iso_info = dict()
-        for li in ul:
-            hrefs = li.xpath('./a/@href')
-            if not hrefs:
-                row = li.text_content().split(':')
-                row = [i.strip() for i in row]
-                if len(row) == 2:
-                    k, v = row
-                    self.iso_info[slugify(k, separator='_')] = v
-            self.iso_links.extend(hrefs)
-
-    def sanitize_iso_info(self):
-        logger.debug('sanitize iso info')
-        for k in self.expected_iso_fields:
-            if not k in self.iso_info:
-                raise MissingField(k)
-        self.iso_info = {k: v for k, v in self.iso_info.items() if k in self.expected_iso_fields}
-
-        # Convert value
-        self.iso_info['release_date'] = datetime.strptime(self.iso_info['release_date'], '%Y-%m-%d')
-        # self.iso_info['available'] = bool(util.strtobool(self.iso_info['available']))
 
     def is_new_release(self):
         logger.debug('check for new release')
@@ -210,9 +165,7 @@ class latestArch:
             raise ISONotFound
         logger.debug('Checking hash')
         chunk = 65536  # 64kB
-        if self.hash == 'md5': hash_method = hashlib.md5()
-        elif self.hash == 'sha1': hash_method = hashlib.sha1()
-        else: raise Exception # not an expected hash type
+        hash_method = self.hashes[self.hash]
         with open(self.iso_path, 'rb') as f:
             while True:
                 data = f.read(chunk)
@@ -235,10 +188,75 @@ class latestArch:
                 self.last_iso_info = json.loads(f.read())
                 self.last_iso_info['release_date'] = datetime.strptime(self.last_iso_info['release_date'], '%Y-%m-%d %H:%M:%S')
 
-latestArch()
 
+class latestArch(latestISO):
+    def __init__(self):
+        self.arch_url = 'https://www.archlinux.org'
+        self.releases_endpoint = '/releng/releases'
+        super().__init__()
+
+    def get_release_url(self):
+        logger.debug('find page for latest release')
+        r = self.get(self.releases_url)
+        page = html.fromstring(r.text)
+        latest_release_endpoint = page.xpath('//*[@id="release-table"]/tbody/tr[1]/td[3]/a/@href')[0]
+        self.latest_release_url = self.arch_url + latest_release_endpoint
+
+    def get_iso_info(self):
+        logger.debug('scraping iso info')
+        r = self.get(self.latest_release_url)
+        page = html.fromstring(r.text)
+        ul = page.xpath('//*[@class="release box"]/ul/li')
+        self.iso_links = []
+        self.iso_info = dict()
+        for li in ul:
+            hrefs = li.xpath('./a/@href')
+            if not hrefs:
+                row = li.text_content().split(':')
+                row = [i.strip() for i in row]
+                if len(row) == 2:
+                    k, v = row
+                    self.iso_info[slugify(k, separator='_')] = v
+            self.iso_links.extend(hrefs)
+        self.map_iso_links()
+        self.sanitize_iso_info()
+
+    def map_iso_links(self):
+        logger.debug('translate links to keyed values')
+        for link in self.iso_links:
+            if 'magnet' in link.lower():
+                self.iso_info['magnet_link'] = link
+            elif 'torrent' in link.lower():
+                self.iso_info['torrent_link'] = self.arch_url + link
+
+    def sanitize_iso_info(self):
+        logger.debug('sanitize iso info')
+        for k in self.expected_iso_fields:
+            if not k in self.iso_info:
+                raise MissingField(k)
+        self.iso_info = {k: v for k, v in self.iso_info.items() if k in self.expected_iso_fields}
+
+        # Convert value
+        self.iso_info['release_date'] = datetime.strptime(self.iso_info['release_date'], '%Y-%m-%d')
+        # self.iso_info['available'] = bool(util.strtobool(self.iso_info['available']))
+
+latestArch().get_latest()
 
 # TODO:
-# log to file or stdout/stderr
-# log errors
+# log to file
+# log rotation
+# redo debug out
+# redo info out
+# redo/add warn out?
 # account for checking/init time at start beyond sleep
+# check exit codes
+# unit tests
+# load from config
+# cli
+# see if there is a better way to do exceptions
+# get_torrent also trys to force start torrent
+# only print progress bar of stdout / add progress flag
+# parse torrent file
+# expand for Fedora ISO
+# expand for Alpine ISO
+
