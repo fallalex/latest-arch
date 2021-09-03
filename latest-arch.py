@@ -261,4 +261,5 @@ latestArch().get_latest()
 # expand for Fedora ISO
 # expand for Alpine ISO
 # break into files
+# switch/add aria2 for bitclient/downloader
 
